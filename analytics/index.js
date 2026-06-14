@@ -149,7 +149,7 @@ function addReading(data, broker) {
 async function startKafka() {
   const kafka = new Kafka({
     clientId: "analytics-service",
-    brokers: [KAFKA_BROKER],
+    brokers: KAFKA_BROKER.split(","),
     retry: { retries: 10, initialRetryTime: 1000 },
   });
 

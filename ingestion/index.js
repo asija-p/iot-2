@@ -1,13 +1,15 @@
 const fs = require("fs");
 const { parse } = require("csv-parse/sync");
 const mqtt = require("mqtt");
-const { Kafka } = require("kafkajs");
+const { Kafka } = require("kafkajs"); // Added KafkaJS
 
 // ─── KONFIGURACIJA ────────────────────────────────────────────
 const MQTT_BROKER = process.env.MQTT_BROKER || "mqtt://localhost:1883";
-const KAFKA_BROKER = process.env.KAFKA_BROKER || "localhost:9092";
-const KAFKA_TOPIC = "sensor-data";
 const MQTT_TOPIC = "iot/sensors";
+
+const KAFKA_BROKER = process.env.KAFKA_BROKER || "localhost:9092";
+const KAFKA_TOPIC = process.env.KAFKA_TOPIC || "sensor-data";
+
 const NUM_DEVICES = parseInt(process.env.NUM_DEVICES || "10");
 const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || "100");
 
@@ -20,9 +22,8 @@ function loadDataset() {
     trim: true,
   });
 
-  // Transformiši svaki red u naš format
   return records.map((r) => ({
-    temperature: parseFloat(r["tempreature"]), // typo je u datasetu
+    temperature: parseFloat(r["tempreature"]), // Keeping your original typo matching your CSV
     humidity: parseFloat(r["humidity"]),
     water_level: parseFloat(r["water_level"]),
     n_value: parseFloat(r["N"]),
@@ -40,21 +41,12 @@ async function main() {
   const dataset = loadDataset();
   console.log(`Dataset učitan: ${dataset.length} redova`);
 
-  // Kafka setup
-  const kafka = new Kafka({
-    clientId: "ingestion-service",
-    brokers: [KAFKA_BROKER],
-    retry: { retries: 10, initialRetryTime: 1000 },
-  });
-  const producer = kafka.producer();
-  await producer.connect();
-  console.log("Kafka producer povezan");
-
-  // MQTT setup
+  // 1. MQTT Setup
   const mqttClient = mqtt.connect(MQTT_BROKER, {
     reconnectPeriod: 1000,
     connectTimeout: 10000,
   });
+
   await new Promise((resolve, reject) => {
     mqttClient.on("connect", () => {
       console.log("MQTT klijent povezan");
@@ -63,44 +55,53 @@ async function main() {
     mqttClient.on("error", reject);
   });
 
-  // Napravi N uređaja i pokreni svaki
+  // 2. Kafka Setup
+  const kafka = new Kafka({
+    clientId: "ingestion-service",
+    brokers: KAFKA_BROKER.split(","),
+    retry: { retries: 10, initialRetryTime: 1000 },
+  });
+  const producer = kafka.producer();
+
+  await producer.connect();
+  console.log("Kafka producer povezan");
+
   console.log(`Pokrećem ${NUM_DEVICES} uređaja, interval: ${INTERVAL_MS}ms`);
 
   for (let i = 0; i < NUM_DEVICES; i++) {
     const deviceId = `device_${String(i).padStart(4, "0")}`;
-
-    // Svaki uređaj počinje od svoje pozicije u datasetu
     let rowIndex = i % dataset.length;
 
     setInterval(
-      async () => {
+      () => {
         const row = dataset[rowIndex];
         rowIndex = (rowIndex + 1) % dataset.length;
 
-        // Svakih 50 poruka simuliraj kritičnu temperaturu za merenje latencije
-        const isCritical = Math.random() < 0.02; // 2% poruka je kritično
+        const isCritical = Math.random() < 0.02;
 
         const message = {
           device_id: deviceId,
           timestamp: new Date().toISOString(),
-          sent_at: Date.now(), // za merenje latencije
+          sent_at: Date.now(),
           ...row,
           temperature: isCritical ? 55 : row.temperature,
         };
 
         const payload = JSON.stringify(message);
 
-        // Pošalji na MQTT
+        // Šalje se na MQTT bez čekanja i kočenja
         mqttClient.publish(MQTT_TOPIC, payload, { qos: 1 });
 
-        // Pošalji na Kafka
-        await producer.send({
-          topic: KAFKA_TOPIC,
-          messages: [{ key: deviceId, value: payload }],
-        });
+        // Šalje se na Kafka bez čekanja i kočenja, koristeći deviceId kao ključ
+        producer
+          .send({
+            topic: KAFKA_TOPIC,
+            messages: [{ key: deviceId, value: payload }],
+          })
+          .catch((e) => console.error("Kafka send error:", e.message));
       },
       Math.floor(INTERVAL_MS + Math.random() * 50),
-    ); // mali jitter da ne šalju svi tačno u isto vreme
+    );
   }
 
   console.log("Svi uređaji aktivni. Ctrl+C za stop.");
